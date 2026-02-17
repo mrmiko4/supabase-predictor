@@ -1,13 +1,22 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import WingoPanel from "@/components/WingoPanel";
 
 const Index = () => {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
-      </div>
-    </div>
+    <>
+      <iframe
+        src="https://dkwin2.web.app/#/register?invitationCode=65862531031"
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          border: "none",
+          zIndex: 1,
+        }}
+      />
+      <WingoPanel />
+    </>
   );
 };
 
