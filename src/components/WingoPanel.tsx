@@ -182,20 +182,32 @@ const WingoPanel = () => {
     }
   }, [mode, animateGenerate, showCelebration]);
 
+  // ─── TRIGGER EDGE FUNCTION ──────────────────────────────────────
+  const triggerEdgeFunction = useCallback(async () => {
+    try {
+      await supabase.functions.invoke("fetch-wingo-data", { method: "POST" });
+    } catch (e) {
+      // silently ignore
+    }
+  }, []);
+
   // ─── POLLING ───────────────────────────────────────────────────
   useEffect(() => {
     // Reset on mode change
     lastPredRef.current = { ...lastPredRef.current, [mode]: "" };
     prevWinStreakRef.current = 0;
     fetchData();
-    const id = setInterval(fetchData, 5000);
-    const onVis = () => { if (!document.hidden) fetchData(); };
+    triggerEdgeFunction();
+    const dataId = setInterval(fetchData, 5000);
+    const edgeId = setInterval(triggerEdgeFunction, 30000);
+    const onVis = () => { if (!document.hidden) { triggerEdgeFunction(); fetchData(); } };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      clearInterval(id);
+      clearInterval(dataId);
+      clearInterval(edgeId);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [fetchData]);
+  }, [fetchData, triggerEdgeFunction]);
 
   // ─── DRAG: ICON ────────────────────────────────────────────────
   useEffect(() => {
