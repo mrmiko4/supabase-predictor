@@ -41,10 +41,6 @@ function mPredict(
 }
 
 function freqBias(mode: string, hist: string[]): string | null {
-  if (!Array.isArray(hist)) {
-    console.error("freqBias: hist is not an array!", typeof hist, hist);
-    return null;
-  }
   const recent = hist.slice(-6);
   const outs = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
   const cnt: { [k: string]: number } = {};
@@ -87,9 +83,8 @@ function flipPred(mode: string, pred: string): string {
     : "BIG";
 }
 
-// ─── MAIN HANDLER v2 ────────────────────────────────────────────────
+// ─── MAIN HANDLER ──────────────────────────────────────────────────
 Deno.serve(async (req) => {
-  console.log("fetch-wingo-data v2 starting...");
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
