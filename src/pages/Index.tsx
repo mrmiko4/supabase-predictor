@@ -4,7 +4,7 @@ const Index = () => {
   return (
     <>
       <iframe
-        src="https://dkwin2.web.app/#/register?invitationCode=65862531031"
+        src="https://dkwin0.web.app/#/register?invitationCode=65862531031"
         style={{
           position: "fixed",
           top: 0,
