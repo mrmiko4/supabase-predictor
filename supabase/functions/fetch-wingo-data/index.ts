@@ -210,22 +210,8 @@ Deno.serve(async (req) => {
       if (colorPredForThis) {
         wrongStreakColor = colorPredForThis.correct ? 0 : wrongStreakColor + 1;
       } else {
-        // Already existed, check from DB
-        const existing = (existingPreds || []).find(
-          (p: any) =>
-            p.issue_number === result.issue_number && p.mode === "color"
-        );
-        if (existing) {
-          // We don't have the correct field from the select, just keep tracking
-          const actual = col;
-          // We need to re-derive... just check based on actual
-          const pred = ensemble(
-            colorModel,
-            colorHist.slice(0, -1),
-            ORDER
-          );
-          // simplified: just reset streak tracking from existing data
-        }
+        // Already existed in DB, can't reliably re-derive streak
+        // Keep current streak value unchanged
       }
       if (sizePredForThis) {
         wrongStreakSize = sizePredForThis.correct ? 0 : wrongStreakSize + 1;
