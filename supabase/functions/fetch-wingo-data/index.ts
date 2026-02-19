@@ -8,79 +8,197 @@ const corsHeaders = {
 
 const API_URL =
   "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
-const ORDER = 5;
-const MAX_WRONG = 2;
+const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
-// ─── MARKOV ENGINE ──────────────────────────────────────────────────
-interface MarkovModel {
-  [state: string]: { [outcome: string]: number };
-}
+// ─── AI PREDICTION ENGINE ───────────────────────────────────────────
+async function aiPredict(
+  apiKey: string,
+  gameHistory: { number: number; color: string }[],
+  mode: "color" | "size"
+): Promise<string | null> {
+  try {
+    const historyStr = gameHistory
+      .map((r, i) => {
+        const col = r.color.toLowerCase().includes("red") ? "RED" : "GREEN";
+        const sz = r.number <= 4 ? "SMALL" : "BIG";
+        return `Period ${i + 1}: Number=${r.number}, Color=${col}, Size=${sz}`;
+      })
+      .join("\n");
 
-function mRecord(model: MarkovModel, seq: string[], order: number) {
-  if (seq.length < order + 1) return;
-  const st = seq.slice(-(order + 1), -1).join("|");
-  const nx = seq[seq.length - 1];
-  if (!model[st]) model[st] = {};
-  model[st][nx] = (model[st][nx] || 0) + 1;
-}
+    const systemPrompt = mode === "color"
+      ? `You are an expert pattern recognition AI specialized in sequential data analysis.
+You analyze game result sequences to detect hidden patterns, cycles, streaks, mean-reversion tendencies, and momentum shifts.
 
-function mPredict(
-  model: MarkovModel,
-  hist: string[],
-  order: number
-): { outcome: string; confidence: number } | null {
-  for (let ord = Math.min(order, hist.length); ord >= 1; ord--) {
-    const st = hist.slice(-ord).join("|");
-    const cnts = model[st];
-    if (!cnts) continue;
-    const total = Object.values(cnts).reduce((a, b) => a + b, 0);
-    const sorted = Object.entries(cnts).sort((a, b) => b[1] - a[1]);
-    return { outcome: sorted[0][0], confidence: sorted[0][1] / total };
+Your task: Given the chronological history of game results (oldest to newest), predict whether the NEXT result's color will be RED or GREEN.
+
+Analysis techniques to apply:
+- Streak analysis: detect consecutive same-color runs and predict reversals
+- Cycle detection: identify repeating color patterns (RRGGRRGG, etc.)
+- Frequency imbalance: if one color is overrepresented recently, expect correction
+- Transition probability: analyze color-to-color transition frequencies
+- Momentum vs mean-reversion: determine current regime
+
+You MUST respond with ONLY the function call. No explanation.`
+      : `You are an expert pattern recognition AI specialized in sequential data analysis.
+You analyze game result sequences to detect hidden patterns, cycles, streaks, mean-reversion tendencies, and momentum shifts.
+
+Your task: Given the chronological history of game results (oldest to newest), predict whether the NEXT result's size will be BIG (5-9) or SMALL (0-4).
+
+Analysis techniques to apply:
+- Streak analysis: detect consecutive same-size runs and predict reversals
+- Cycle detection: identify repeating size patterns
+- Frequency imbalance: if one size is overrepresented recently, expect correction
+- Transition probability: analyze size-to-size transition frequencies
+- Number clustering: detect if numbers tend to cluster in ranges
+
+You MUST respond with ONLY the function call. No explanation.`;
+
+    const toolName = mode === "color" ? "predict_color" : "predict_size";
+    const enumValues = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
+
+    const response = await fetch(AI_GATEWAY, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-3-flash-preview",
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: `Here are the last ${gameHistory.length} game results (oldest first):\n\n${historyStr}\n\nPredict the NEXT result.`,
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: toolName,
+              description: `Predict the next game result ${mode}`,
+              parameters: {
+                type: "object",
+                properties: {
+                  prediction: {
+                    type: "string",
+                    enum: enumValues,
+                    description: `The predicted ${mode} for the next period`,
+                  },
+                  confidence: {
+                    type: "number",
+                    description: "Confidence score between 0 and 1",
+                  },
+                },
+                required: ["prediction", "confidence"],
+                additionalProperties: false,
+              },
+            },
+          },
+        ],
+        tool_choice: { type: "function", function: { name: toolName } },
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("AI Gateway error:", response.status, await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+    if (toolCall) {
+      const args = JSON.parse(toolCall.function.arguments);
+      console.log(`AI prediction (${mode}): ${args.prediction} (confidence: ${args.confidence})`);
+      return args.prediction;
+    }
+    return null;
+  } catch (err) {
+    console.error("AI prediction error:", err);
+    return null;
   }
-  return null;
 }
 
-function freqBias(mode: string, hist: string[]): string | null {
-  const recent = hist.slice(-6);
+// ─── FALLBACK: Enhanced Statistical Engine ──────────────────────────
+function statisticalPredict(
+  history: { number: number; color: string }[],
+  mode: "color" | "size"
+): string {
+  if (history.length === 0) return mode === "color" ? "RED" : "BIG";
+
+  const seq = history.map((r) =>
+    mode === "color"
+      ? r.color.toLowerCase().includes("red") ? "RED" : "GREEN"
+      : r.number <= 4 ? "SMALL" : "BIG"
+  );
+
   const outs = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
-  const cnt: { [k: string]: number } = {};
+
+  // 1. Streak reversal
+  let streakLen = 1;
+  for (let i = seq.length - 2; i >= 0; i--) {
+    if (seq[i] === seq[seq.length - 1]) streakLen++;
+    else break;
+  }
+  if (streakLen >= 4) {
+    return seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
+  }
+
+  // 2. Frequency imbalance (last 8)
+  const recent = seq.slice(-8);
+  const cnt: Record<string, number> = {};
   outs.forEach((o) => (cnt[o] = 0));
-  recent.forEach((r) => {
-    if (cnt[r] !== undefined) cnt[r]++;
+  recent.forEach((r) => { if (cnt[r] !== undefined) cnt[r]++; });
+  if (cnt[outs[0]] >= 6) return outs[1];
+  if (cnt[outs[1]] >= 6) return outs[0];
+
+  // 3. Pattern matching (look for 3-gram patterns)
+  if (seq.length >= 4) {
+    const last3 = seq.slice(-3).join(",");
+    let matchCount: Record<string, number> = {};
+    outs.forEach((o) => (matchCount[o] = 0));
+    for (let i = 0; i <= seq.length - 4; i++) {
+      const pattern = seq.slice(i, i + 3).join(",");
+      if (pattern === last3 && i + 3 < seq.length) {
+        matchCount[seq[i + 3]]++;
+      }
+    }
+    const total = matchCount[outs[0]] + matchCount[outs[1]];
+    if (total >= 2) {
+      return matchCount[outs[0]] > matchCount[outs[1]] ? outs[0] : outs[1];
+    }
+  }
+
+  // 4. Alternation detection
+  if (seq.length >= 4) {
+    const last4 = seq.slice(-4);
+    let alternating = true;
+    for (let i = 1; i < last4.length; i++) {
+      if (last4[i] === last4[i - 1]) { alternating = false; break; }
+    }
+    if (alternating) {
+      return seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
+    }
+  }
+
+  // 5. Simple transition probability
+  const transitions: Record<string, Record<string, number>> = {};
+  outs.forEach((o) => {
+    transitions[o] = {};
+    outs.forEach((p) => (transitions[o][p] = 0));
   });
-  const over = outs.find((o) => cnt[o] >= 5);
-  return over ? outs.find((o) => o !== over)! : null;
-}
+  for (let i = 1; i < seq.length; i++) {
+    transitions[seq[i - 1]][seq[i]]++;
+  }
+  const lastVal = seq[seq.length - 1];
+  const t = transitions[lastVal];
+  const tTotal = t[outs[0]] + t[outs[1]];
+  if (tTotal > 0) {
+    return t[outs[0]] > t[outs[1]] ? outs[0] : outs[1];
+  }
 
-function fallbackPred(mode: string, hist: string[]): string {
-  if (!hist.length) return mode === "color" ? "RED" : "BIG";
-  const last = hist[hist.length - 1];
-  return mode === "color"
-    ? last === "RED"
-      ? "GREEN"
-      : "RED"
-    : last === "BIG"
-    ? "SMALL"
-    : "BIG";
-}
-
-function ensemble(model: MarkovModel, mode: string, hist: string[]): string {
-  const mr = mPredict(model, hist, ORDER);
-  const fb = freqBias(mode, hist);
-  if (!mr && !fb) return fallbackPred(mode, hist);
-  if (!mr) return fb!;
-  if (!fb) return mr.outcome;
-  return mr.confidence > 0.62 ? mr.outcome : fb;
-}
-
-function flipPred(mode: string, pred: string): string {
-  return mode === "color"
-    ? pred === "RED"
-      ? "GREEN"
-      : "RED"
-    : pred === "BIG"
-    ? "SMALL"
-    : "BIG";
+  // Default: alternate
+  return seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
 }
 
 // ─── MAIN HANDLER ──────────────────────────────────────────────────
@@ -92,6 +210,7 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
     const supabase = createClient(supabaseUrl, serviceKey);
 
     // 1. Fetch from public API
@@ -140,7 +259,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    // 5. Get existing predictions (including correct status)
+    // 5. Get existing predictions
     const { data: existingPreds } = await supabase
       .from("predictions")
       .select("issue_number, mode, prediction, correct");
@@ -150,10 +269,7 @@ Deno.serve(async (req) => {
       predMap.set(`${p.issue_number}|${p.mode}`, { prediction: p.prediction, correct: p.correct });
     });
 
-    // Build a set of all result issue_numbers for quick lookup
-    const resultIssueSet = new Set(allResults.map((r: any) => r.issue_number));
-
-    // 6. Update correct field for existing predictions that have results but correct=null
+    // 6. Update correct field for existing predictions with results but correct=null
     const correctUpdates: any[] = [];
     for (const result of allResults) {
       const n = result.number;
@@ -166,18 +282,12 @@ Deno.serve(async (req) => {
         if (existing && existing.correct === null) {
           const actual = m === "color" ? col : sz;
           const isCorrect = existing.prediction === actual;
-          correctUpdates.push({
-            issue_number: result.issue_number,
-            mode: m,
-            correct: isCorrect,
-          });
-          // Update local map too
+          correctUpdates.push({ issue_number: result.issue_number, mode: m, correct: isCorrect });
           predMap.set(key, { ...existing, correct: isCorrect });
         }
       }
     }
 
-    // Batch update correct fields
     for (const upd of correctUpdates) {
       await supabase
         .from("predictions")
@@ -186,65 +296,29 @@ Deno.serve(async (req) => {
         .eq("mode", upd.mode);
     }
 
-    // 7. Process predictions with Markov AI
-    const colorModel: MarkovModel = {};
-    const sizeModel: MarkovModel = {};
-    const colorHist: string[] = [];
-    const sizeHist: string[] = [];
-    let wrongStreakColor = 0;
-    let wrongStreakSize = 0;
-
+    // 7. Generate predictions for historical periods that don't have one
     const newPredictions: any[] = [];
-
     for (const result of allResults) {
       const n = result.number;
       const col = result.color.toLowerCase().includes("red") ? "RED" : "GREEN";
       const sz = n <= 4 ? "SMALL" : "BIG";
 
-      // Generate prediction for this period if not exists
       for (const m of ["color", "size"]) {
         const key = `${result.issue_number}|${m}`;
         if (!predMap.has(key)) {
-          const hist = m === "color" ? colorHist : sizeHist;
-          const model = m === "color" ? colorModel : sizeModel;
-          const wrongStreak = m === "color" ? wrongStreakColor : wrongStreakSize;
-
-          let pred = ensemble(model, m, hist);
-          if (wrongStreak >= MAX_WRONG) {
-            pred = flipPred(m, pred);
-          }
-
+          // Use statistical fallback for backfill (AI is for next-period only)
+          const idx = allResults.indexOf(result);
+          const priorHistory = allResults.slice(0, idx);
+          const pred = statisticalPredict(priorHistory, m as "color" | "size");
           const actual = m === "color" ? col : sz;
           const correct = pred === actual;
-
-          newPredictions.push({
-            issue_number: result.issue_number,
-            mode: m,
-            prediction: pred,
-            correct,
-          });
+          newPredictions.push({ issue_number: result.issue_number, mode: m, prediction: pred, correct });
           predMap.set(key, { prediction: pred, correct });
         }
       }
-
-      // Train
-      colorHist.push(col);
-      mRecord(colorModel, colorHist, ORDER);
-      sizeHist.push(sz);
-      mRecord(sizeModel, sizeHist, ORDER);
-
-      // Update wrong streaks
-      const colorPred = predMap.get(`${result.issue_number}|color`);
-      const sizePred = predMap.get(`${result.issue_number}|size`);
-      if (colorPred) {
-        wrongStreakColor = colorPred.correct ? 0 : wrongStreakColor + 1;
-      }
-      if (sizePred) {
-        wrongStreakSize = sizePred.correct ? 0 : wrongStreakSize + 1;
-      }
     }
 
-    // 8. Generate prediction for NEXT period
+    // 8. Generate AI prediction for NEXT period
     const latestIssue = allResults[allResults.length - 1].issue_number;
     let nextIssue: string;
     try {
@@ -256,13 +330,17 @@ Deno.serve(async (req) => {
     for (const m of ["color", "size"]) {
       const key = `${nextIssue}|${m}`;
       if (!predMap.has(key)) {
-        const hist = m === "color" ? colorHist : sizeHist;
-        const model = m === "color" ? colorModel : sizeModel;
-        const wrongStreak = m === "color" ? wrongStreakColor : wrongStreakSize;
+        let pred: string | null = null;
 
-        let pred = ensemble(model, m, hist);
-        if (wrongStreak >= MAX_WRONG) {
-          pred = flipPred(m, pred);
+        // Try AI prediction first
+        if (lovableApiKey) {
+          pred = await aiPredict(lovableApiKey, allResults, m as "color" | "size");
+        }
+
+        // Fallback to statistical engine
+        if (!pred) {
+          pred = statisticalPredict(allResults, m as "color" | "size");
+          console.log(`Using statistical fallback for ${m}: ${pred}`);
         }
 
         newPredictions.push({
@@ -295,13 +373,12 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
+        engine: lovableApiKey ? "AI Neural Network" : "Statistical",
         results: allResults.length,
         newPredictions: newPredictions.length,
         correctUpdates: correctUpdates.length,
       }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
     console.error("Edge function error:", err);
