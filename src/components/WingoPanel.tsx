@@ -382,7 +382,7 @@ const WingoPanel = () => {
           }} />
         ))}
 
-        <div className="panel-header">⚡ WinGo 30s live Hack ⚡</div>
+        <div className="panel-header">🧠 WinGo 30s AI Predictor 🧠</div>
 
         <div className="mode-tabs">
           <button
@@ -453,7 +453,7 @@ const WingoPanel = () => {
             </tbody>
           </table>
         </div>
-        <div className="footer-note">live sync · Advanced Markov AI · max 2-loss guarantee</div>
+        <div className="footer-note">live sync · Neural Network AI Engine · Gemini Powered</div>
       </div>
     </>
   );
