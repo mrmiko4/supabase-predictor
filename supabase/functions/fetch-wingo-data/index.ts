@@ -95,7 +95,6 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, serviceKey);
 
     // 1. Fetch from public API
-    console.log("Fetching from public API...");
     const apiRes = await fetch(API_URL);
     const apiJson = await apiRes.json();
 
@@ -141,16 +140,53 @@ Deno.serve(async (req) => {
       });
     }
 
-    // 5. Get existing predictions to avoid duplicates
+    // 5. Get existing predictions (including correct status)
     const { data: existingPreds } = await supabase
       .from("predictions")
-      .select("issue_number, mode");
+      .select("issue_number, mode, prediction, correct");
 
-    const predSet = new Set(
-      (existingPreds || []).map((p: any) => `${p.issue_number}|${p.mode}`)
-    );
+    const predMap = new Map<string, { prediction: string; correct: boolean | null }>();
+    (existingPreds || []).forEach((p: any) => {
+      predMap.set(`${p.issue_number}|${p.mode}`, { prediction: p.prediction, correct: p.correct });
+    });
 
-    // 6. Process predictions with Markov AI
+    // Build a set of all result issue_numbers for quick lookup
+    const resultIssueSet = new Set(allResults.map((r: any) => r.issue_number));
+
+    // 6. Update correct field for existing predictions that have results but correct=null
+    const correctUpdates: any[] = [];
+    for (const result of allResults) {
+      const n = result.number;
+      const col = result.color.toLowerCase().includes("red") ? "RED" : "GREEN";
+      const sz = n <= 4 ? "SMALL" : "BIG";
+
+      for (const m of ["color", "size"]) {
+        const key = `${result.issue_number}|${m}`;
+        const existing = predMap.get(key);
+        if (existing && existing.correct === null) {
+          const actual = m === "color" ? col : sz;
+          const isCorrect = existing.prediction === actual;
+          correctUpdates.push({
+            issue_number: result.issue_number,
+            mode: m,
+            correct: isCorrect,
+          });
+          // Update local map too
+          predMap.set(key, { ...existing, correct: isCorrect });
+        }
+      }
+    }
+
+    // Batch update correct fields
+    for (const upd of correctUpdates) {
+      await supabase
+        .from("predictions")
+        .update({ correct: upd.correct })
+        .eq("issue_number", upd.issue_number)
+        .eq("mode", upd.mode);
+    }
+
+    // 7. Process predictions with Markov AI
     const colorModel: MarkovModel = {};
     const sizeModel: MarkovModel = {};
     const colorHist: string[] = [];
@@ -166,59 +202,49 @@ Deno.serve(async (req) => {
       const sz = n <= 4 ? "SMALL" : "BIG";
 
       // Generate prediction for this period if not exists
-      for (const mode of ["color", "size"]) {
-        const key = `${result.issue_number}|${mode}`;
-        if (!predSet.has(key)) {
-          const hist = mode === "color" ? colorHist : sizeHist;
-          const model = mode === "color" ? colorModel : sizeModel;
-          const wrongStreak =
-            mode === "color" ? wrongStreakColor : wrongStreakSize;
+      for (const m of ["color", "size"]) {
+        const key = `${result.issue_number}|${m}`;
+        if (!predMap.has(key)) {
+          const hist = m === "color" ? colorHist : sizeHist;
+          const model = m === "color" ? colorModel : sizeModel;
+          const wrongStreak = m === "color" ? wrongStreakColor : wrongStreakSize;
 
-          let pred = ensemble(model, mode, hist);
+          let pred = ensemble(model, m, hist);
           if (wrongStreak >= MAX_WRONG) {
-            pred = flipPred(mode, pred);
+            pred = flipPred(m, pred);
           }
 
-          const actual = mode === "color" ? col : sz;
+          const actual = m === "color" ? col : sz;
           const correct = pred === actual;
 
           newPredictions.push({
             issue_number: result.issue_number,
-            mode,
+            mode: m,
             prediction: pred,
             correct,
           });
-          predSet.add(key);
+          predMap.set(key, { prediction: pred, correct });
         }
       }
 
-      // Now consume the result (train)
+      // Train
       colorHist.push(col);
       mRecord(colorModel, colorHist, ORDER);
       sizeHist.push(sz);
       mRecord(sizeModel, sizeHist, ORDER);
 
-      // Update wrong streaks based on actual correctness
-      // Check what was predicted for this period
-      const colorPredForThis = newPredictions.find(
-        (p) => p.issue_number === result.issue_number && p.mode === "color"
-      );
-      const sizePredForThis = newPredictions.find(
-        (p) => p.issue_number === result.issue_number && p.mode === "size"
-      );
-
-      if (colorPredForThis) {
-        wrongStreakColor = colorPredForThis.correct ? 0 : wrongStreakColor + 1;
-      } else {
-        // Already existed in DB, can't reliably re-derive streak
-        // Keep current streak value unchanged
+      // Update wrong streaks
+      const colorPred = predMap.get(`${result.issue_number}|color`);
+      const sizePred = predMap.get(`${result.issue_number}|size`);
+      if (colorPred) {
+        wrongStreakColor = colorPred.correct ? 0 : wrongStreakColor + 1;
       }
-      if (sizePredForThis) {
-        wrongStreakSize = sizePredForThis.correct ? 0 : wrongStreakSize + 1;
+      if (sizePred) {
+        wrongStreakSize = sizePred.correct ? 0 : wrongStreakSize + 1;
       }
     }
 
-    // 7. Generate prediction for NEXT period
+    // 8. Generate prediction for NEXT period
     const latestIssue = allResults[allResults.length - 1].issue_number;
     let nextIssue: string;
     try {
@@ -227,29 +253,28 @@ Deno.serve(async (req) => {
       nextIssue = latestIssue + "?";
     }
 
-    for (const mode of ["color", "size"]) {
-      const key = `${nextIssue}|${mode}`;
-      if (!predSet.has(key)) {
-        const hist = mode === "color" ? colorHist : sizeHist;
-        const model = mode === "color" ? colorModel : sizeModel;
-        const wrongStreak =
-          mode === "color" ? wrongStreakColor : wrongStreakSize;
+    for (const m of ["color", "size"]) {
+      const key = `${nextIssue}|${m}`;
+      if (!predMap.has(key)) {
+        const hist = m === "color" ? colorHist : sizeHist;
+        const model = m === "color" ? colorModel : sizeModel;
+        const wrongStreak = m === "color" ? wrongStreakColor : wrongStreakSize;
 
-        let pred = ensemble(model, mode, hist);
+        let pred = ensemble(model, m, hist);
         if (wrongStreak >= MAX_WRONG) {
-          pred = flipPred(mode, pred);
+          pred = flipPred(m, pred);
         }
 
         newPredictions.push({
           issue_number: nextIssue,
-          mode,
+          mode: m,
           prediction: pred,
-          correct: null, // unknown yet
+          correct: null,
         });
       }
     }
 
-    // 8. Insert all new predictions
+    // 9. Insert all new predictions
     if (newPredictions.length > 0) {
       const { error: predErr } = await supabase
         .from("predictions")
@@ -260,11 +285,11 @@ Deno.serve(async (req) => {
       if (predErr) console.error("Prediction insert error:", predErr);
     }
 
-    // 9. Trim predictions
+    // 10. Trim predictions
     await supabase.rpc("trim_predictions");
 
     console.log(
-      `Processed ${allResults.length} results, ${newPredictions.length} new predictions`
+      `Processed ${allResults.length} results, ${newPredictions.length} new preds, ${correctUpdates.length} correct updates`
     );
 
     return new Response(
@@ -272,6 +297,7 @@ Deno.serve(async (req) => {
         success: true,
         results: allResults.length,
         newPredictions: newPredictions.length,
+        correctUpdates: correctUpdates.length,
       }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },

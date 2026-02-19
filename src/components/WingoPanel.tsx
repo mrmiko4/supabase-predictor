@@ -22,34 +22,39 @@ const WingoPanel = () => {
   const [predClass, setPredClass] = useState("pred-red");
   const [countdown, setCountdown] = useState("--s");
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isRevealed, setIsRevealed] = useState(false);
   const [winStreak, setWinStreak] = useState(0);
   const [newRowIdx, setNewRowIdx] = useState<number | null>(null);
 
-  const lastTopIssueRef = useRef<string | null>(null);
-  const lastPredRef = useRef<{ color: string; size: string }>({ color: "", size: "" });
+  const lastTopIssueRef = useRef<Record<string, string>>({ color: "", size: "" });
+  const cachedPredRef = useRef<Record<string, string>>({ color: "", size: "" });
   const prevWinStreakRef = useRef(0);
   const panelRef = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLDivElement>(null);
-  const genTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const predDivRef = useRef<HTMLDivElement>(null);
+  const genTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [celState, setCelState] = useState<null | 5 | 10>(null);
   const celTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [confettiDots, setConfettiDots] = useState<any[]>([]);
+  const lastEdgeTriggerRef = useRef(0);
 
-  // ─── COUNTDOWN ────────────────────────────────────────────────
+  // Helper: get seconds remaining in current 30s period (GMT+6)
+  const getSecondsInPeriod = useCallback(() => {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const gmt6 = new Date(utc + 6 * 3600000);
+    const s = gmt6.getSeconds();
+    return s < 30 ? 30 - s : 60 - s;
+  }, []);
+
+  // ─── COUNTDOWN + PERIOD BOUNDARY SYNC ─────────────────────────
   useEffect(() => {
     const update = () => {
-      const now = new Date();
-      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-      const gmt6 = new Date(utc + 6 * 3600000);
-      const s = gmt6.getSeconds();
-      setCountdown((s < 30 ? 30 - s : 60 - s) + "s");
+      const remaining = getSecondsInPeriod();
+      setCountdown(remaining + "s");
     };
     update();
     const id = setInterval(update, 500);
     return () => clearInterval(id);
-  }, []);
+  }, [getSecondsInPeriod]);
 
   // ─── CONFETTI ──────────────────────────────────────────────────
   const spawnConfetti = useCallback((count: number) => {
@@ -77,41 +82,42 @@ const WingoPanel = () => {
     }, 2500);
   }, [spawnConfetti]);
 
-  // ─── ANIMATE PREDICTION ───────────────────────────────────────
-  const animateGenerate = useCallback((finalText: string, css: string) => {
-    if (genTimerRef.current) clearInterval(genTimerRef.current);
+  // ─── ANIMATE PREDICTION (scanning style, only in first 3s) ────
+  const showPredictionAnim = useCallback((finalText: string, css: string) => {
+    if (genTimerRef.current) {
+      clearTimeout(genTimerRef.current);
+      genTimerRef.current = null;
+    }
+
+    const remaining = getSecondsInPeriod();
+    // Only animate in the first 3 seconds of a new period (remaining >= 27)
+    if (remaining <= 27) {
+      // No animation, just show the prediction directly
+      setPredClass(css);
+      setPrediction(finalText);
+      setIsGenerating(false);
+      return;
+    }
+
+    // Show scanning animation
     setIsGenerating(true);
-    setIsRevealed(false);
     setPredClass("is-generating");
-    setPrediction("...");
+    setPrediction("⟳");
 
-    const flickerChars = mode === "color"
-      ? ["RED", "GRN", "R??", "G??", "...", "!!!", "???"]
-      : ["BIG", "SML", "B??", "S??", "...", "!!!", "???"];
-
-    let tick = 0;
-    genTimerRef.current = setInterval(() => {
-      setPrediction(flickerChars[tick % flickerChars.length]);
-      tick++;
-      if (tick >= 10) {
-        clearInterval(genTimerRef.current!);
-        genTimerRef.current = null;
-        setIsGenerating(false);
-        setIsRevealed(true);
-        setPredClass(css + " is-revealed");
-        setPrediction(finalText);
-        setTimeout(() => {
-          setPredClass(css);
-          setIsRevealed(false);
-        }, 650);
-      }
-    }, 85);
-  }, [mode]);
+    genTimerRef.current = setTimeout(() => {
+      genTimerRef.current = null;
+      setIsGenerating(false);
+      setPredClass(css + " is-revealed");
+      setPrediction(finalText);
+      setTimeout(() => {
+        setPredClass(css);
+      }, 650);
+    }, 1800);
+  }, [getSecondsInPeriod]);
 
   // ─── FETCH DATA ────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
     try {
-      // Get history with predictions for current mode
       const { data: histData, error: histErr } = await supabase.rpc(
         "get_history_with_predictions",
         { p_mode: mode }
@@ -125,10 +131,10 @@ const WingoPanel = () => {
       const rows = histData as HistoryRow[];
       setHistory(rows);
 
-      // Detect new data
+      // Detect new data per mode
       const latestIssue = rows[0].issue_number;
-      const isNew = latestIssue !== lastTopIssueRef.current;
-      lastTopIssueRef.current = latestIssue;
+      const isNew = latestIssue !== lastTopIssueRef.current[mode];
+      lastTopIssueRef.current = { ...lastTopIssueRef.current, [mode]: latestIssue };
       if (isNew) setNewRowIdx(0);
       else setNewRowIdx(null);
 
@@ -155,16 +161,18 @@ const WingoPanel = () => {
           ? pred === "RED" ? "pred-red" : "pred-green"
           : pred === "BIG" ? "pred-big" : "pred-small";
 
-        if (pred !== lastPredRef.current[mode]) {
-          lastPredRef.current = { ...lastPredRef.current, [mode]: pred };
-          animateGenerate(pred, css);
-        } else {
+        // Only animate if prediction actually changed (new period or new prediction)
+        if (pred !== cachedPredRef.current[mode]) {
+          cachedPredRef.current = { ...cachedPredRef.current, [mode]: pred };
+          showPredictionAnim(pred, css);
+        } else if (!isGenerating) {
+          // Just display without animation
           setPredClass(css);
           setPrediction(pred);
         }
       }
 
-      // Calculate win streak from history
+      // Calculate win streak
       let ws = 0;
       for (const row of rows) {
         if (row.correct === true) ws++;
@@ -172,7 +180,6 @@ const WingoPanel = () => {
       }
       setWinStreak(ws);
 
-      // Check streak crossing thresholds
       const prev = prevWinStreakRef.current;
       if (prev < 5 && ws >= 5) showCelebration(5);
       if (prev < 10 && ws >= 10) showCelebration(10);
@@ -180,34 +187,86 @@ const WingoPanel = () => {
     } catch (err) {
       console.error("fetchData error:", err);
     }
-  }, [mode, animateGenerate, showCelebration]);
+  }, [mode, showPredictionAnim, showCelebration, isGenerating]);
 
   // ─── TRIGGER EDGE FUNCTION ──────────────────────────────────────
   const triggerEdgeFunction = useCallback(async () => {
     try {
+      lastEdgeTriggerRef.current = Date.now();
       await supabase.functions.invoke("fetch-wingo-data", { method: "POST" });
     } catch (e) {
       // silently ignore
     }
   }, []);
 
-  // ─── POLLING ───────────────────────────────────────────────────
+  // ─── PERIOD BOUNDARY DETECTION: trigger at second 27 and 57 ───
   useEffect(() => {
-    // Reset on mode change
-    lastPredRef.current = { ...lastPredRef.current, [mode]: "" };
-    prevWinStreakRef.current = 0;
+    let lastTriggeredSecond = -1;
+
+    const checkBoundary = () => {
+      const now = new Date();
+      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+      const gmt6 = new Date(utc + 6 * 3600000);
+      const s = gmt6.getSeconds();
+
+      // Trigger at seconds 27-28 and 57-58 (period boundaries)
+      if ((s === 27 || s === 28 || s === 57 || s === 58) && s !== lastTriggeredSecond) {
+        lastTriggeredSecond = s;
+        // Trigger edge function to fetch latest data, then fetch UI data
+        triggerEdgeFunction().then(() => {
+          // Small delay to let edge function process
+          setTimeout(() => fetchData(), 1500);
+        });
+      }
+
+      // Also trigger at seconds 0 and 30 (start of new period) for instant update
+      if ((s === 0 || s === 1 || s === 30 || s === 31) && s !== lastTriggeredSecond) {
+        lastTriggeredSecond = s;
+        triggerEdgeFunction().then(() => {
+          setTimeout(() => fetchData(), 1000);
+        });
+      }
+
+      // Reset tracker when moving away from trigger seconds
+      if (s !== 27 && s !== 28 && s !== 57 && s !== 58 && s !== 0 && s !== 1 && s !== 30 && s !== 31) {
+        lastTriggeredSecond = -1;
+      }
+    };
+
+    const id = setInterval(checkBoundary, 500);
+    return () => clearInterval(id);
+  }, [triggerEdgeFunction, fetchData]);
+
+  // ─── INITIAL LOAD + REGULAR POLLING ────────────────────────────
+  useEffect(() => {
     fetchData();
     triggerEdgeFunction();
     const dataId = setInterval(fetchData, 5000);
-    const edgeId = setInterval(triggerEdgeFunction, 30000);
-    const onVis = () => { if (!document.hidden) { triggerEdgeFunction(); fetchData(); } };
+    const onVis = () => {
+      if (!document.hidden) {
+        triggerEdgeFunction();
+        fetchData();
+      }
+    };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       clearInterval(dataId);
-      clearInterval(edgeId);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [fetchData, triggerEdgeFunction]);
+
+  // ─── MODE SWITCH: show cached prediction without animation ─────
+  useEffect(() => {
+    const cached = cachedPredRef.current[mode];
+    if (cached) {
+      const css = mode === "color"
+        ? cached === "RED" ? "pred-red" : "pred-green"
+        : cached === "BIG" ? "pred-big" : "pred-small";
+      setPredClass(css);
+      setPrediction(cached);
+      setIsGenerating(false);
+    }
+  }, [mode]);
 
   // ─── DRAG: ICON ────────────────────────────────────────────────
   useEffect(() => {
@@ -295,7 +354,7 @@ const WingoPanel = () => {
     winStreak >= 5 && winStreak < 10 && "win5-state",
   ].filter(Boolean).join(" ");
 
-  const predClassName = isGenerating ? "is-generating" : predClass;
+  const predClassName = isGenerating ? "prediction-value is-generating" : `prediction-value ${predClass}`;
 
   return (
     <>
@@ -304,7 +363,6 @@ const WingoPanel = () => {
       </div>
 
       <div ref={panelRef} className={panelClass}>
-        {/* Celebration overlay */}
         {celState && (
           <div className={`streak-cel cel-in ${celState === 10 ? "cel-10" : "cel-5"}`}>
             <div className="cel-ring" style={{ color: celState === 10 ? "#00ccff" : "#ffd700" }} />
@@ -316,7 +374,6 @@ const WingoPanel = () => {
           </div>
         )}
 
-        {/* Confetti */}
         {confettiDots.map(d => (
           <div key={d.id} className="confetti-dot" style={{
             left: d.left, top: d.top, background: d.bg,
@@ -345,13 +402,12 @@ const WingoPanel = () => {
             <span>⏳ NEXT PERIOD</span>
             <span className="countdown-span">{countdown}</span>
           </div>
-          <div className="next-period">{nextPeriod}</div>
-          <div ref={predDivRef} className={`prediction-value ${predClassName}`}>
+          <div className="next-period">{shortPeriod(nextPeriod)}</div>
+          <div className={predClassName}>
             {prediction}
           </div>
         </div>
 
-        {/* Streak badge */}
         {winStreak >= 5 && (
           <div className={`streak-badge show ${winStreak >= 10 ? "badge-10" : "badge-5"}`}>
             🏆 {winStreak >= 10 ? 10 : 5} WIN STREAK 🏆
@@ -376,7 +432,8 @@ const WingoPanel = () => {
                     : (pred === "BIG" ? "pred-big" : "pred-small");
                   const rowClasses = [
                     newRowIdx === i && "row-new",
-                    newRowIdx === i && (ok ? "row-win-flash-delayed" : "row-loss-flash-delayed"),
+                    newRowIdx === i && ok === true && "row-win-flash-delayed",
+                    newRowIdx === i && ok === false && "row-loss-flash-delayed",
                   ].filter(Boolean).join(" ");
                   return (
                     <tr key={row.issue_number} className={rowClasses}>
@@ -396,7 +453,7 @@ const WingoPanel = () => {
             </tbody>
           </table>
         </div>
-        <div className="footer-note">updates every 5s · Advanced Markov AI · max 2-loss guarantee</div>
+        <div className="footer-note">live sync · Advanced Markov AI · max 2-loss guarantee</div>
       </div>
     </>
   );
