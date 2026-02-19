@@ -386,13 +386,13 @@ const WingoPanel = () => {
 
         <div className="mode-tabs">
           <button
+            className={`mode-btn ${mode === "size" ? "active" : ""}`}
+            onClick={(e) => { e.stopPropagation(); setMode("size"); }}
+          >🐘 Big/Small</button>
+          <button
             className={`mode-btn ${mode === "color" ? "active" : ""}`}
             onClick={(e) => { e.stopPropagation(); setMode("color"); }}
           >🎨 Color</button>
-          <button
-            className={`mode-btn ${mode === "size" ? "active" : ""}`}
-            onClick={(e) => { e.stopPropagation(); setMode("size"); }}
-          >🔲 Big/Small</button>
         </div>
 
         <div className={`next-box ${isGenerating ? "generating" : ""}`}>
