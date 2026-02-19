@@ -382,7 +382,7 @@ const WingoPanel = () => {
           }} />
         ))}
 
-        <div className="panel-header">🧠 WinGo 30s AI Predictor 🧠</div>
+        <div className="panel-header">🧠 AX WinGo30s Ai HACK🧠</div>
 
         <div className="mode-tabs">
           <button
@@ -418,7 +418,7 @@ const WingoPanel = () => {
         <div className="table-wrapper">
           <table>
             <thead>
-              <tr><th>Period</th><th>Prediction</th><th style={{ width: 38 }}>✅</th></tr>
+              <tr><th>Period</th><th>Prediction</th><th style={{ width: 38 }}>Status</th></tr>
             </thead>
             <tbody>
               {history.length === 0 ? (
