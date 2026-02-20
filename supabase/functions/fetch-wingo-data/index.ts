@@ -690,15 +690,22 @@ Deno.serve(async (req) => {
       // PREDICT using formula set
       let pred: string | null = null;
 
+      let appliedFormula: Formula | null = null;
+
       // Try AI-enhanced prediction first (uses extracted rules as context)
       if (lovableApiKey && formulas.length > 0) {
         pred = await aiEnhanceRules(lovableApiKey, formulas, allResults, m);
+        if (pred) {
+          // Find matching formula for display
+          appliedFormula = formulas.find(f => f.prediction === pred) || null;
+        }
       }
 
       // Fallback to direct formula application
       if (!pred && formulas.length > 0) {
         const result = applyFormulas(formulas, allResults, m);
         pred = result.prediction;
+        appliedFormula = result.formula;
         if (result.formula) {
           console.log(`[${m}] Applied formula: ${result.formula.description}`);
         } else {
@@ -719,6 +726,15 @@ Deno.serve(async (req) => {
         mode: m,
         prediction: pred,
         correct: null,
+        formula_applied: appliedFormula ? {
+          id: appliedFormula.id,
+          type: appliedFormula.type,
+          condition: appliedFormula.condition,
+          prediction: appliedFormula.prediction,
+          confidence: appliedFormula.confidence,
+          support: appliedFormula.support,
+          description: appliedFormula.description,
+        } : null,
       });
     }
 

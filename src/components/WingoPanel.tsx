@@ -11,6 +11,16 @@ interface HistoryRow {
   correct: boolean | null;
 }
 
+interface AppliedFormula {
+  id: string;
+  type: string;
+  condition: string;
+  prediction: string;
+  confidence: number;
+  support: number;
+  description: string;
+}
+
 const shortPeriod = (p: string) => (p ? p.slice(-8) : "--");
 
 const WingoPanel = () => {
@@ -24,7 +34,8 @@ const WingoPanel = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [winStreak, setWinStreak] = useState(0);
   const [newRowIdx, setNewRowIdx] = useState<number | null>(null);
-
+  const [appliedFormula, setAppliedFormula] = useState<AppliedFormula | null>(null);
+  const [formulaOpen, setFormulaOpen] = useState(false);
   const lastTopIssueRef = useRef<Record<string, string>>({ color: "", size: "" });
   const cachedPredRef = useRef<Record<string, string>>({ color: "", size: "" });
   const prevWinStreakRef = useRef(0);
@@ -150,7 +161,7 @@ const WingoPanel = () => {
       // Fetch next period prediction
       const { data: nextPredData } = await supabase
         .from("predictions")
-        .select("prediction")
+        .select("prediction, formula_applied")
         .eq("issue_number", nextIssue)
         .eq("mode", mode)
         .maybeSingle();
@@ -160,6 +171,11 @@ const WingoPanel = () => {
         const css = mode === "color"
           ? pred === "RED" ? "pred-red" : "pred-green"
           : pred === "BIG" ? "pred-big" : "pred-small";
+
+        // Store applied formula
+        if (nextPredData.formula_applied) {
+          setAppliedFormula(nextPredData.formula_applied as unknown as AppliedFormula);
+        }
 
         // Only animate if prediction actually changed (new period or new prediction)
         if (pred !== cachedPredRef.current[mode]) {
@@ -406,6 +422,43 @@ const WingoPanel = () => {
           <div className={predClassName}>
             {prediction}
           </div>
+        </div>
+
+        {/* Formula Inspector */}
+        <div className="formula-inspector">
+          <button
+            className="formula-toggle"
+            onClick={(e) => { e.stopPropagation(); setFormulaOpen(o => !o); }}
+          >
+            🔬 {formulaOpen ? "Hide" : "Show"} Formula
+          </button>
+          {formulaOpen && (
+            <div className="formula-details">
+              {appliedFormula ? (
+                <>
+                  <div className="formula-row">
+                    <span className="formula-label">Rule</span>
+                    <span className="formula-val">{appliedFormula.condition}</span>
+                  </div>
+                  <div className="formula-row">
+                    <span className="formula-label">Type</span>
+                    <span className="formula-type">{appliedFormula.type.replace(/_/g, " ")}</span>
+                  </div>
+                  <div className="formula-row">
+                    <span className="formula-label">Confidence</span>
+                    <span className="formula-conf">{(appliedFormula.confidence * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="formula-row">
+                    <span className="formula-label">Support</span>
+                    <span className="formula-val">{appliedFormula.support} matches</span>
+                  </div>
+                  <div className="formula-desc">{appliedFormula.description}</div>
+                </>
+              ) : (
+                <div className="formula-desc">AI-enhanced prediction (no single rule)</div>
+              )}
+            </div>
+          )}
         </div>
 
         {winStreak >= 5 && (
