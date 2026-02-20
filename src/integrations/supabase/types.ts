@@ -87,6 +87,7 @@ export type Database = {
         Row: {
           correct: boolean | null
           created_at: string
+          formula_applied: Json | null
           id: string
           issue_number: string
           mode: string
@@ -95,6 +96,7 @@ export type Database = {
         Insert: {
           correct?: boolean | null
           created_at?: string
+          formula_applied?: Json | null
           id?: string
           issue_number: string
           mode: string
@@ -103,6 +105,7 @@ export type Database = {
         Update: {
           correct?: boolean | null
           created_at?: string
+          formula_applied?: Json | null
           id?: string
           issue_number?: string
           mode?: string
