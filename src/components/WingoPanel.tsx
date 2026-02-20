@@ -382,7 +382,7 @@ const WingoPanel = () => {
           }} />
         ))}
 
-        <div className="panel-header">🧠 AX WinGo30s Ai HACK🧠</div>
+        <div className="panel-header">🧠 AX WinGo30s AI HACK 🧠</div>
 
         <div className="mode-tabs">
           <button
@@ -453,7 +453,7 @@ const WingoPanel = () => {
             </tbody>
           </table>
         </div>
-        <div className="footer-note">live sync · Neural Network AI Engine · Gemini Powered</div>
+        <div className="footer-note">live sync · Self-Adaptive Rule Engine · AI + Formula Extraction</div>
       </div>
     </>
   );
