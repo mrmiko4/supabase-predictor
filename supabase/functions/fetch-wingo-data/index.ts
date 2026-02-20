@@ -9,49 +9,428 @@ const corsHeaders = {
 const API_URL =
   "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
 const AI_GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
+const MAX_CONSECUTIVE_FAILURES = 3;
+const MIN_FORMULA_CONFIDENCE = 0.55;
+const MIN_SUPPORT_PCT = 0.03;
 
-// ─── AI PREDICTION ENGINE ───────────────────────────────────────────
-async function aiPredict(
+// ─── TYPES ──────────────────────────────────────────────────────────
+interface GameRecord {
+  issue_number: string;
+  number: number;
+  color: string;
+}
+
+interface Formula {
+  id: string;
+  type: string;
+  condition: string;
+  prediction: string;
+  confidence: number;
+  support: number;
+  description: string;
+}
+
+interface FormulaSet {
+  formulas: Formula[];
+  accuracy: number;
+  total_predictions: number;
+  correct_predictions: number;
+  consecutive_failures: number;
+}
+
+// ─── FEATURE EXTRACTION ─────────────────────────────────────────────
+function extractFeatures(history: GameRecord[], mode: "color" | "size") {
+  const seq = history.map((r) =>
+    mode === "color"
+      ? r.color.toLowerCase().includes("red") ? "RED" : "GREEN"
+      : r.number <= 4 ? "SMALL" : "BIG"
+  );
+  const nums = history.map((r) => r.number);
+  return { seq, nums };
+}
+
+// ─── RULE EXTRACTION ENGINE ─────────────────────────────────────────
+// Analyzes up to 1000 records and extracts IF-THEN formulas
+function extractRules(
+  history: GameRecord[],
+  mode: "color" | "size"
+): Formula[] {
+  const { seq, nums } = extractFeatures(history, mode);
+  const outs = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
+  const formulas: Formula[] = [];
+  const totalLen = seq.length;
+  if (totalLen < 10) return formulas;
+
+  // ── RULE 1: Streak Reversal Rules (length 3,4,5,6+) ──
+  for (const streakLen of [3, 4, 5, 6]) {
+    for (const val of outs) {
+      let matches = 0, correct = 0;
+      for (let i = streakLen; i < totalLen; i++) {
+        let isStreak = true;
+        for (let j = 1; j <= streakLen; j++) {
+          if (seq[i - j] !== val) { isStreak = false; break; }
+        }
+        if (isStreak) {
+          matches++;
+          const opposite = val === outs[0] ? outs[1] : outs[0];
+          if (seq[i] === opposite) correct++;
+        }
+      }
+      if (matches >= totalLen * MIN_SUPPORT_PCT) {
+        const conf = matches > 0 ? correct / matches : 0;
+        if (conf >= MIN_FORMULA_CONFIDENCE) {
+          const opposite = val === outs[0] ? outs[1] : outs[0];
+          formulas.push({
+            id: `streak_rev_${streakLen}_${val}`,
+            type: "streak_reversal",
+            condition: `IF last ${streakLen} results = ${val}`,
+            prediction: opposite,
+            confidence: Math.round(conf * 1000) / 1000,
+            support: matches,
+            description: `After ${streakLen}+ consecutive ${val}, predict ${opposite} (reversal)`,
+          });
+        }
+      }
+    }
+  }
+
+  // ── RULE 2: N-gram Pattern Rules (2,3,4,5-gram) ──
+  for (const n of [2, 3, 4, 5]) {
+    if (totalLen < n + 1) continue;
+    const patternCounts: Record<string, Record<string, number>> = {};
+    for (let i = 0; i <= totalLen - n - 1; i++) {
+      const pattern = seq.slice(i, i + n).join(",");
+      const next = seq[i + n];
+      if (!patternCounts[pattern]) {
+        patternCounts[pattern] = {};
+        outs.forEach((o) => (patternCounts[pattern][o] = 0));
+      }
+      patternCounts[pattern][next]++;
+    }
+    for (const [pattern, counts] of Object.entries(patternCounts)) {
+      const total = outs.reduce((s, o) => s + (counts[o] || 0), 0);
+      if (total < totalLen * MIN_SUPPORT_PCT) continue;
+      for (const out of outs) {
+        const conf = total > 0 ? (counts[out] || 0) / total : 0;
+        if (conf >= MIN_FORMULA_CONFIDENCE) {
+          formulas.push({
+            id: `ngram_${n}_${pattern}_${out}`,
+            type: `${n}gram_pattern`,
+            condition: `IF last ${n} = [${pattern}]`,
+            prediction: out,
+            confidence: Math.round(conf * 1000) / 1000,
+            support: total,
+            description: `Pattern [${pattern}] → ${out} (${n}-gram)`,
+          });
+        }
+      }
+    }
+  }
+
+  // ── RULE 3: Frequency Imbalance Rules (window 5,8,10,15) ──
+  for (const window of [5, 8, 10, 15]) {
+    if (totalLen < window + 1) continue;
+    for (const threshold of [0.7, 0.8, 0.9]) {
+      for (const dominantVal of outs) {
+        let matches = 0, correct = 0;
+        for (let i = window; i < totalLen; i++) {
+          const windowSlice = seq.slice(i - window, i);
+          const dominantCount = windowSlice.filter((v) => v === dominantVal).length;
+          if (dominantCount / window >= threshold) {
+            matches++;
+            const opposite = dominantVal === outs[0] ? outs[1] : outs[0];
+            if (seq[i] === opposite) correct++;
+          }
+        }
+        if (matches >= totalLen * MIN_SUPPORT_PCT) {
+          const conf = matches > 0 ? correct / matches : 0;
+          if (conf >= MIN_FORMULA_CONFIDENCE) {
+            const opposite = dominantVal === outs[0] ? outs[1] : outs[0];
+            formulas.push({
+              id: `freq_imb_${window}_${Math.round(threshold * 100)}_${dominantVal}`,
+              type: "frequency_imbalance",
+              condition: `IF ${dominantVal} ≥ ${Math.round(threshold * 100)}% in last ${window}`,
+              prediction: opposite,
+              confidence: Math.round(conf * 1000) / 1000,
+              support: matches,
+              description: `${dominantVal} dominates last ${window} (≥${Math.round(threshold * 100)}%) → ${opposite}`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // ── RULE 4: Alternation Rules ──
+  for (const altLen of [3, 4, 5, 6]) {
+    if (totalLen < altLen + 1) continue;
+    let matches = 0, correct = 0;
+    for (let i = altLen; i < totalLen; i++) {
+      let isAlt = true;
+      for (let j = 1; j < altLen; j++) {
+        if (seq[i - j] === seq[i - j - 1]) { isAlt = false; break; }
+      }
+      if (isAlt) {
+        matches++;
+        const expected = seq[i - 1] === outs[0] ? outs[1] : outs[0];
+        if (seq[i] === expected) correct++;
+      }
+    }
+    if (matches >= totalLen * MIN_SUPPORT_PCT) {
+      const conf = matches > 0 ? correct / matches : 0;
+      if (conf >= MIN_FORMULA_CONFIDENCE) {
+        formulas.push({
+          id: `alt_${altLen}`,
+          type: "alternation",
+          condition: `IF last ${altLen} alternate perfectly`,
+          prediction: "CONTINUE_ALT",
+          confidence: Math.round(conf * 1000) / 1000,
+          support: matches,
+          description: `${altLen}-length alternation detected → continue pattern`,
+        });
+      }
+    }
+  }
+
+  // ── RULE 5: Transition Probability Rules ──
+  const transitions: Record<string, Record<string, number>> = {};
+  outs.forEach((o) => {
+    transitions[o] = {};
+    outs.forEach((p) => (transitions[o][p] = 0));
+  });
+  for (let i = 1; i < totalLen; i++) {
+    transitions[seq[i - 1]][seq[i]]++;
+  }
+  for (const from of outs) {
+    const total = outs.reduce((s, to) => s + transitions[from][to], 0);
+    for (const to of outs) {
+      const conf = total > 0 ? transitions[from][to] / total : 0;
+      if (conf >= MIN_FORMULA_CONFIDENCE && total >= totalLen * MIN_SUPPORT_PCT) {
+        formulas.push({
+          id: `trans_${from}_${to}`,
+          type: "transition",
+          condition: `IF last result = ${from}`,
+          prediction: to,
+          confidence: Math.round(conf * 1000) / 1000,
+          support: total,
+          description: `${from} → ${to} transition (P=${Math.round(conf * 100)}%)`,
+        });
+      }
+    }
+  }
+
+  // ── RULE 6: Number Range Clustering (size mode) ──
+  if (mode === "size" && totalLen >= 20) {
+    for (const window of [5, 8, 10]) {
+      if (totalLen < window + 1) continue;
+      let matches = 0, correct = 0;
+      for (let i = window; i < totalLen; i++) {
+        const avgNum = nums.slice(i - window, i).reduce((a, b) => a + b, 0) / window;
+        if (avgNum <= 3) {
+          matches++;
+          if (seq[i] === "SMALL") correct++;
+        } else if (avgNum >= 6) {
+          matches++;
+          if (seq[i] === "BIG") correct++;
+        }
+      }
+      if (matches >= totalLen * MIN_SUPPORT_PCT) {
+        const conf = matches > 0 ? correct / matches : 0;
+        if (conf >= MIN_FORMULA_CONFIDENCE) {
+          formulas.push({
+            id: `num_cluster_${window}`,
+            type: "number_clustering",
+            condition: `IF avg(last ${window} numbers) extreme`,
+            prediction: "FOLLOW_TREND",
+            confidence: Math.round(conf * 1000) / 1000,
+            support: matches,
+            description: `Number clustering in last ${window} → follow trend`,
+          });
+        }
+      }
+    }
+  }
+
+  // ── RULE 7: Double/Triple Repeat Rules ──
+  for (const repeatLen of [2, 3]) {
+    if (totalLen < repeatLen * 2 + 1) continue;
+    for (const val of outs) {
+      let matches = 0, correct = 0;
+      for (let i = repeatLen * 2; i < totalLen; i++) {
+        // Check if pattern X repeated twice
+        let isDoubleRepeat = true;
+        for (let j = 0; j < repeatLen; j++) {
+          if (seq[i - 1 - j] !== val || seq[i - 1 - j - repeatLen] !== val) {
+            isDoubleRepeat = false;
+            break;
+          }
+        }
+        if (isDoubleRepeat) {
+          matches++;
+          const opposite = val === outs[0] ? outs[1] : outs[0];
+          if (seq[i] === opposite) correct++;
+        }
+      }
+      if (matches >= totalLen * MIN_SUPPORT_PCT * 0.5) {
+        const conf = matches > 0 ? correct / matches : 0;
+        if (conf >= MIN_FORMULA_CONFIDENCE) {
+          const opposite = val === outs[0] ? outs[1] : outs[0];
+          formulas.push({
+            id: `dbl_repeat_${repeatLen}_${val}`,
+            type: "double_repeat",
+            condition: `IF ${val} repeated ${repeatLen}x twice`,
+            prediction: opposite,
+            confidence: Math.round(conf * 1000) / 1000,
+            support: matches,
+            description: `Double ${repeatLen}-repeat of ${val} → ${opposite}`,
+          });
+        }
+      }
+    }
+  }
+
+  // Sort by confidence * support (weighted score)
+  formulas.sort((a, b) => (b.confidence * b.support) - (a.confidence * a.support));
+  return formulas.slice(0, 30); // Keep top 30 rules
+}
+
+// ─── APPLY FORMULA SET TO PREDICT ───────────────────────────────────
+function applyFormulas(
+  formulas: Formula[],
+  history: GameRecord[],
+  mode: "color" | "size"
+): { prediction: string; formula: Formula | null } {
+  const { seq, nums } = extractFeatures(history, mode);
+  const outs = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
+
+  for (const formula of formulas) {
+    switch (formula.type) {
+      case "streak_reversal": {
+        const match = formula.condition.match(/last (\d+) results = (\w+)/);
+        if (match) {
+          const len = parseInt(match[1]);
+          const val = match[2];
+          if (seq.length >= len) {
+            const tail = seq.slice(-len);
+            if (tail.every((v) => v === val)) {
+              return { prediction: formula.prediction, formula };
+            }
+          }
+        }
+        break;
+      }
+      case "2gram_pattern":
+      case "3gram_pattern":
+      case "4gram_pattern":
+      case "5gram_pattern": {
+        const nMatch = formula.type.match(/(\d+)gram/);
+        if (nMatch) {
+          const n = parseInt(nMatch[1]);
+          if (seq.length >= n) {
+            const lastN = seq.slice(-n).join(",");
+            const condPattern = formula.condition.match(/\[(.+)\]/)?.[1];
+            if (condPattern === lastN) {
+              return { prediction: formula.prediction, formula };
+            }
+          }
+        }
+        break;
+      }
+      case "frequency_imbalance": {
+        const fiMatch = formula.condition.match(/(\w+) ≥ (\d+)% in last (\d+)/);
+        if (fiMatch) {
+          const val = fiMatch[1];
+          const threshold = parseInt(fiMatch[2]) / 100;
+          const window = parseInt(fiMatch[3]);
+          if (seq.length >= window) {
+            const windowSlice = seq.slice(-window);
+            const count = windowSlice.filter((v) => v === val).length;
+            if (count / window >= threshold) {
+              return { prediction: formula.prediction, formula };
+            }
+          }
+        }
+        break;
+      }
+      case "alternation": {
+        const altMatch = formula.condition.match(/last (\d+) alternate/);
+        if (altMatch) {
+          const len = parseInt(altMatch[1]);
+          if (seq.length >= len) {
+            const tail = seq.slice(-len);
+            let isAlt = true;
+            for (let i = 1; i < tail.length; i++) {
+              if (tail[i] === tail[i - 1]) { isAlt = false; break; }
+            }
+            if (isAlt) {
+              const pred = seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
+              return { prediction: pred, formula };
+            }
+          }
+        }
+        break;
+      }
+      case "transition": {
+        const trMatch = formula.condition.match(/last result = (\w+)/);
+        if (trMatch && seq.length > 0 && seq[seq.length - 1] === trMatch[1]) {
+          return { prediction: formula.prediction, formula };
+        }
+        break;
+      }
+      case "number_clustering": {
+        const ncMatch = formula.condition.match(/last (\d+) numbers/);
+        if (ncMatch) {
+          const window = parseInt(ncMatch[1]);
+          if (nums.length >= window) {
+            const avg = nums.slice(-window).reduce((a, b) => a + b, 0) / window;
+            if (avg <= 3) return { prediction: "SMALL", formula };
+            if (avg >= 6) return { prediction: "BIG", formula };
+          }
+        }
+        break;
+      }
+      case "double_repeat": {
+        const drMatch = formula.condition.match(/(\w+) repeated (\d+)x twice/);
+        if (drMatch) {
+          const val = drMatch[1];
+          const repLen = parseInt(drMatch[2]);
+          if (seq.length >= repLen * 2) {
+            const tail = seq.slice(-repLen * 2);
+            if (tail.every((v) => v === val)) {
+              return { prediction: formula.prediction, formula };
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // No formula matched - use best transition rule as default
+  if (seq.length > 0) {
+    const last = seq[seq.length - 1];
+    return { prediction: last === outs[0] ? outs[1] : outs[0], formula: null };
+  }
+  return { prediction: outs[0], formula: null };
+}
+
+// ─── AI-ENHANCED RULE VALIDATION ────────────────────────────────────
+async function aiEnhanceRules(
   apiKey: string,
-  gameHistory: { number: number; color: string }[],
+  formulas: Formula[],
+  history: GameRecord[],
   mode: "color" | "size"
 ): Promise<string | null> {
   try {
-    const historyStr = gameHistory
-      .map((r, i) => {
-        const col = r.color.toLowerCase().includes("red") ? "RED" : "GREEN";
-        const sz = r.number <= 4 ? "SMALL" : "BIG";
-        return `Period ${i + 1}: Number=${r.number}, Color=${col}, Size=${sz}`;
-      })
-      .join("\n");
+    const topFormulas = formulas.slice(0, 10).map((f) =>
+      `${f.description} [confidence: ${f.confidence}, support: ${f.support}]`
+    ).join("\n");
 
-    const systemPrompt = mode === "color"
-      ? `You are an expert pattern recognition AI specialized in sequential data analysis.
-You analyze game result sequences to detect hidden patterns, cycles, streaks, mean-reversion tendencies, and momentum shifts.
-
-Your task: Given the chronological history of game results (oldest to newest), predict whether the NEXT result's color will be RED or GREEN.
-
-Analysis techniques to apply:
-- Streak analysis: detect consecutive same-color runs and predict reversals
-- Cycle detection: identify repeating color patterns (RRGGRRGG, etc.)
-- Frequency imbalance: if one color is overrepresented recently, expect correction
-- Transition probability: analyze color-to-color transition frequencies
-- Momentum vs mean-reversion: determine current regime
-
-You MUST respond with ONLY the function call. No explanation.`
-      : `You are an expert pattern recognition AI specialized in sequential data analysis.
-You analyze game result sequences to detect hidden patterns, cycles, streaks, mean-reversion tendencies, and momentum shifts.
-
-Your task: Given the chronological history of game results (oldest to newest), predict whether the NEXT result's size will be BIG (5-9) or SMALL (0-4).
-
-Analysis techniques to apply:
-- Streak analysis: detect consecutive same-size runs and predict reversals
-- Cycle detection: identify repeating size patterns
-- Frequency imbalance: if one size is overrepresented recently, expect correction
-- Transition probability: analyze size-to-size transition frequencies
-- Number clustering: detect if numbers tend to cluster in ranges
-
-You MUST respond with ONLY the function call. No explanation.`;
+    const last20 = history.slice(-20).map((r, i) => {
+      const col = r.color.toLowerCase().includes("red") ? "RED" : "GREEN";
+      const sz = r.number <= 4 ? "SMALL" : "BIG";
+      return `${i + 1}: Num=${r.number}, Col=${col}, Size=${sz}`;
+    }).join("\n");
 
     const toolName = mode === "color" ? "predict_color" : "predict_size";
     const enumValues = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
@@ -65,37 +444,38 @@ You MUST respond with ONLY the function call. No explanation.`;
       body: JSON.stringify({
         model: "google/gemini-3-flash-preview",
         messages: [
-          { role: "system", content: systemPrompt },
+          {
+            role: "system",
+            content: `You are an expert pattern recognition AI. You have extracted statistical rules from 1000 game results. Now use these rules PLUS the recent sequence to make the best prediction.
+
+EXTRACTED RULES (sorted by reliability):
+${topFormulas}
+
+Apply the most relevant rule to the recent data. If multiple rules conflict, weight by confidence × support.
+You MUST respond with ONLY the function call.`,
+          },
           {
             role: "user",
-            content: `Here are the last ${gameHistory.length} game results (oldest first):\n\n${historyStr}\n\nPredict the NEXT result.`,
+            content: `Last 20 results:\n${last20}\n\nPredict the NEXT ${mode} result.`,
           },
         ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: toolName,
-              description: `Predict the next game result ${mode}`,
-              parameters: {
-                type: "object",
-                properties: {
-                  prediction: {
-                    type: "string",
-                    enum: enumValues,
-                    description: `The predicted ${mode} for the next period`,
-                  },
-                  confidence: {
-                    type: "number",
-                    description: "Confidence score between 0 and 1",
-                  },
-                },
-                required: ["prediction", "confidence"],
-                additionalProperties: false,
+        tools: [{
+          type: "function",
+          function: {
+            name: toolName,
+            description: `Predict next ${mode} using extracted rules`,
+            parameters: {
+              type: "object",
+              properties: {
+                prediction: { type: "string", enum: enumValues },
+                confidence: { type: "number" },
+                applied_rule: { type: "string", description: "Which rule was applied" },
               },
+              required: ["prediction", "confidence", "applied_rule"],
+              additionalProperties: false,
             },
           },
-        ],
+        }],
         tool_choice: { type: "function", function: { name: toolName } },
       }),
     });
@@ -109,96 +489,14 @@ You MUST respond with ONLY the function call. No explanation.`;
     const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
     if (toolCall) {
       const args = JSON.parse(toolCall.function.arguments);
-      console.log(`AI prediction (${mode}): ${args.prediction} (confidence: ${args.confidence})`);
+      console.log(`AI-enhanced prediction (${mode}): ${args.prediction} [rule: ${args.applied_rule}] (confidence: ${args.confidence})`);
       return args.prediction;
     }
     return null;
   } catch (err) {
-    console.error("AI prediction error:", err);
+    console.error("AI enhancement error:", err);
     return null;
   }
-}
-
-// ─── FALLBACK: Enhanced Statistical Engine ──────────────────────────
-function statisticalPredict(
-  history: { number: number; color: string }[],
-  mode: "color" | "size"
-): string {
-  if (history.length === 0) return mode === "color" ? "RED" : "BIG";
-
-  const seq = history.map((r) =>
-    mode === "color"
-      ? r.color.toLowerCase().includes("red") ? "RED" : "GREEN"
-      : r.number <= 4 ? "SMALL" : "BIG"
-  );
-
-  const outs = mode === "color" ? ["RED", "GREEN"] : ["BIG", "SMALL"];
-
-  // 1. Streak reversal
-  let streakLen = 1;
-  for (let i = seq.length - 2; i >= 0; i--) {
-    if (seq[i] === seq[seq.length - 1]) streakLen++;
-    else break;
-  }
-  if (streakLen >= 4) {
-    return seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
-  }
-
-  // 2. Frequency imbalance (last 8)
-  const recent = seq.slice(-8);
-  const cnt: Record<string, number> = {};
-  outs.forEach((o) => (cnt[o] = 0));
-  recent.forEach((r) => { if (cnt[r] !== undefined) cnt[r]++; });
-  if (cnt[outs[0]] >= 6) return outs[1];
-  if (cnt[outs[1]] >= 6) return outs[0];
-
-  // 3. Pattern matching (look for 3-gram patterns)
-  if (seq.length >= 4) {
-    const last3 = seq.slice(-3).join(",");
-    let matchCount: Record<string, number> = {};
-    outs.forEach((o) => (matchCount[o] = 0));
-    for (let i = 0; i <= seq.length - 4; i++) {
-      const pattern = seq.slice(i, i + 3).join(",");
-      if (pattern === last3 && i + 3 < seq.length) {
-        matchCount[seq[i + 3]]++;
-      }
-    }
-    const total = matchCount[outs[0]] + matchCount[outs[1]];
-    if (total >= 2) {
-      return matchCount[outs[0]] > matchCount[outs[1]] ? outs[0] : outs[1];
-    }
-  }
-
-  // 4. Alternation detection
-  if (seq.length >= 4) {
-    const last4 = seq.slice(-4);
-    let alternating = true;
-    for (let i = 1; i < last4.length; i++) {
-      if (last4[i] === last4[i - 1]) { alternating = false; break; }
-    }
-    if (alternating) {
-      return seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
-    }
-  }
-
-  // 5. Simple transition probability
-  const transitions: Record<string, Record<string, number>> = {};
-  outs.forEach((o) => {
-    transitions[o] = {};
-    outs.forEach((p) => (transitions[o][p] = 0));
-  });
-  for (let i = 1; i < seq.length; i++) {
-    transitions[seq[i - 1]][seq[i]]++;
-  }
-  const lastVal = seq[seq.length - 1];
-  const t = transitions[lastVal];
-  const tTotal = t[outs[0]] + t[outs[1]];
-  if (tTotal > 0) {
-    return t[outs[0]] > t[outs[1]] ? outs[0] : outs[1];
-  }
-
-  // Default: alternate
-  return seq[seq.length - 1] === outs[0] ? outs[1] : outs[0];
 }
 
 // ─── MAIN HANDLER ──────────────────────────────────────────────────
@@ -242,10 +540,10 @@ Deno.serve(async (req) => {
 
     if (upsertErr) console.error("Upsert error:", upsertErr);
 
-    // 3. Trim game_results
+    // 3. Trim game_results to 1000
     await supabase.rpc("trim_game_results");
 
-    // 4. Get all stored results chronologically (oldest first)
+    // 4. Get ALL stored results chronologically (oldest first)
     const { data: allResults, error: fetchErr } = await supabase
       .from("game_results")
       .select("*")
@@ -269,7 +567,7 @@ Deno.serve(async (req) => {
       predMap.set(`${p.issue_number}|${p.mode}`, { prediction: p.prediction, correct: p.correct });
     });
 
-    // 6. Update correct field for existing predictions with results but correct=null
+    // 6. Update correct field for existing predictions
     const correctUpdates: any[] = [];
     for (const result of allResults) {
       const n = result.number;
@@ -296,29 +594,7 @@ Deno.serve(async (req) => {
         .eq("mode", upd.mode);
     }
 
-    // 7. Generate predictions for historical periods that don't have one
-    const newPredictions: any[] = [];
-    for (const result of allResults) {
-      const n = result.number;
-      const col = result.color.toLowerCase().includes("red") ? "RED" : "GREEN";
-      const sz = n <= 4 ? "SMALL" : "BIG";
-
-      for (const m of ["color", "size"]) {
-        const key = `${result.issue_number}|${m}`;
-        if (!predMap.has(key)) {
-          // Use statistical fallback for backfill (AI is for next-period only)
-          const idx = allResults.indexOf(result);
-          const priorHistory = allResults.slice(0, idx);
-          const pred = statisticalPredict(priorHistory, m as "color" | "size");
-          const actual = m === "color" ? col : sz;
-          const correct = pred === actual;
-          newPredictions.push({ issue_number: result.issue_number, mode: m, prediction: pred, correct });
-          predMap.set(key, { prediction: pred, correct });
-        }
-      }
-    }
-
-    // 8. Generate AI prediction for NEXT period
+    // 7. Compute next period
     const latestIssue = allResults[allResults.length - 1].issue_number;
     let nextIssue: string;
     try {
@@ -327,32 +603,155 @@ Deno.serve(async (req) => {
       nextIssue = latestIssue + "?";
     }
 
-    for (const m of ["color", "size"]) {
+    // 8. SELF-ADAPTIVE FORMULA ENGINE
+    const newPredictions: any[] = [];
+    let engineStatus = "formula_cached";
+    let activeFormulaCount = 0;
+
+    for (const m of ["color", "size"] as const) {
       const key = `${nextIssue}|${m}`;
-      if (!predMap.has(key)) {
-        let pred: string | null = null;
+      if (predMap.has(key)) continue;
 
-        // Try AI prediction first
-        if (lovableApiKey) {
-          pred = await aiPredict(lovableApiKey, allResults, m as "color" | "size");
+      // Get active formula set for this mode
+      const { data: activeSet } = await supabase
+        .from("formula_sets")
+        .select("*")
+        .eq("mode", m)
+        .eq("is_active", true)
+        .order("extracted_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      let formulas: Formula[] = [];
+      let needsRetrain = false;
+
+      if (activeSet) {
+        formulas = activeSet.formulas as Formula[];
+        activeFormulaCount += formulas.length;
+
+        // Check if consecutive failures exceeded threshold
+        if (activeSet.consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+          console.log(`[${m}] ${activeSet.consecutive_failures} consecutive failures → RETRAINING`);
+          needsRetrain = true;
         }
 
-        // Fallback to statistical engine
-        if (!pred) {
-          pred = statisticalPredict(allResults, m as "color" | "size");
-          console.log(`Using statistical fallback for ${m}: ${pred}`);
-        }
+        // Update consecutive failures based on last prediction
+        const lastPredKey = `${latestIssue}|${m}`;
+        const lastPred = predMap.get(lastPredKey);
+        if (lastPred && lastPred.correct !== null) {
+          const newFailures = lastPred.correct ? 0 : (activeSet.consecutive_failures + 1);
+          const newCorrect = lastPred.correct ? (activeSet.correct_predictions + 1) : activeSet.correct_predictions;
+          const newTotal = activeSet.total_predictions + 1;
 
-        newPredictions.push({
-          issue_number: nextIssue,
+          await supabase.from("formula_sets").update({
+            consecutive_failures: newFailures,
+            correct_predictions: newCorrect,
+            total_predictions: newTotal,
+            accuracy: newTotal > 0 ? newCorrect / newTotal : 0,
+          }).eq("id", activeSet.id);
+
+          if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
+            needsRetrain = true;
+            console.log(`[${m}] Failure threshold reached → RETRAINING`);
+          }
+        }
+      } else {
+        needsRetrain = true;
+        console.log(`[${m}] No active formula set → INITIAL TRAINING`);
+      }
+
+      // RETRAIN: Extract new rules from all history
+      if (needsRetrain) {
+        engineStatus = "retraining";
+        console.log(`[${m}] Extracting rules from ${allResults.length} records...`);
+
+        // Deactivate old formula sets
+        await supabase.from("formula_sets")
+          .update({ is_active: false })
+          .eq("mode", m);
+
+        // Extract new formulas
+        formulas = extractRules(allResults, m);
+        activeFormulaCount = formulas.length;
+        console.log(`[${m}] Extracted ${formulas.length} rules`);
+
+        // Store new formula set
+        await supabase.from("formula_sets").insert({
           mode: m,
-          prediction: pred,
-          correct: null,
+          formulas: formulas as any,
+          accuracy: 0,
+          total_predictions: 0,
+          correct_predictions: 0,
+          consecutive_failures: 0,
+          is_active: true,
         });
+      }
+
+      // PREDICT using formula set
+      let pred: string | null = null;
+
+      // Try AI-enhanced prediction first (uses extracted rules as context)
+      if (lovableApiKey && formulas.length > 0) {
+        pred = await aiEnhanceRules(lovableApiKey, formulas, allResults, m);
+      }
+
+      // Fallback to direct formula application
+      if (!pred && formulas.length > 0) {
+        const result = applyFormulas(formulas, allResults, m);
+        pred = result.prediction;
+        if (result.formula) {
+          console.log(`[${m}] Applied formula: ${result.formula.description}`);
+        } else {
+          console.log(`[${m}] No formula matched, using default`);
+        }
+      }
+
+      // Final fallback
+      if (!pred) {
+        const { seq } = extractFeatures(allResults, m);
+        pred = seq[seq.length - 1] === (m === "color" ? "RED" : "BIG")
+          ? (m === "color" ? "GREEN" : "SMALL")
+          : (m === "color" ? "RED" : "BIG");
+      }
+
+      newPredictions.push({
+        issue_number: nextIssue,
+        mode: m,
+        prediction: pred,
+        correct: null,
+      });
+    }
+
+    // 9. Backfill predictions for historical periods without one
+    for (const result of allResults) {
+      const n = result.number;
+      const col = result.color.toLowerCase().includes("red") ? "RED" : "GREEN";
+      const sz = n <= 4 ? "SMALL" : "BIG";
+
+      for (const m of ["color", "size"]) {
+        const key = `${result.issue_number}|${m}`;
+        if (!predMap.has(key)) {
+          const idx = allResults.indexOf(result);
+          const prior = allResults.slice(0, idx);
+          if (prior.length >= 3) {
+            const { seq } = extractFeatures(prior, m as "color" | "size");
+            const pred = seq[seq.length - 1] === (m === "color" ? "RED" : "GREEN")
+              ? (m === "color" ? "GREEN" : "SMALL")
+              : (m === "color" ? "RED" : "BIG");
+            const actual = m === "color" ? col : sz;
+            newPredictions.push({
+              issue_number: result.issue_number,
+              mode: m,
+              prediction: pred,
+              correct: pred === actual,
+            });
+            predMap.set(key, { prediction: pred, correct: pred === actual });
+          }
+        }
       }
     }
 
-    // 9. Insert all new predictions
+    // 10. Insert all new predictions
     if (newPredictions.length > 0) {
       const { error: predErr } = await supabase
         .from("predictions")
@@ -363,18 +762,19 @@ Deno.serve(async (req) => {
       if (predErr) console.error("Prediction insert error:", predErr);
     }
 
-    // 10. Trim predictions
+    // 11. Trim predictions
     await supabase.rpc("trim_predictions");
 
     console.log(
-      `Processed ${allResults.length} results, ${newPredictions.length} new preds, ${correctUpdates.length} correct updates`
+      `Engine=${engineStatus} | Records=${allResults.length} | NewPreds=${newPredictions.length} | CorrectUpdates=${correctUpdates.length} | ActiveFormulas=${activeFormulaCount}`
     );
 
     return new Response(
       JSON.stringify({
         success: true,
-        engine: lovableApiKey ? "AI Neural Network" : "Statistical",
-        results: allResults.length,
+        engine: engineStatus,
+        records: allResults.length,
+        activeFormulas: activeFormulaCount,
         newPredictions: newPredictions.length,
         correctUpdates: correctUpdates.length,
       }),

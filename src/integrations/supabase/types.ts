@@ -14,6 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
+      formula_sets: {
+        Row: {
+          accuracy: number | null
+          consecutive_failures: number | null
+          correct_predictions: number | null
+          created_at: string
+          extracted_at: string
+          formulas: Json
+          id: string
+          is_active: boolean | null
+          mode: string
+          total_predictions: number | null
+        }
+        Insert: {
+          accuracy?: number | null
+          consecutive_failures?: number | null
+          correct_predictions?: number | null
+          created_at?: string
+          extracted_at?: string
+          formulas?: Json
+          id?: string
+          is_active?: boolean | null
+          mode: string
+          total_predictions?: number | null
+        }
+        Update: {
+          accuracy?: number | null
+          consecutive_failures?: number | null
+          correct_predictions?: number | null
+          created_at?: string
+          extracted_at?: string
+          formulas?: Json
+          id?: string
+          is_active?: boolean | null
+          mode?: string
+          total_predictions?: number | null
+        }
+        Relationships: []
+      }
       game_results: {
         Row: {
           color: string
