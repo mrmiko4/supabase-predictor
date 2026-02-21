@@ -432,42 +432,6 @@ const WingoPanel = () => {
           )}
         </div>
 
-        {/* Formula Inspector */}
-        <div className="formula-inspector">
-          <button
-            className="formula-toggle"
-            onClick={(e) => { e.stopPropagation(); setFormulaOpen(o => !o); }}
-          >
-            🔬 {formulaOpen ? "Hide" : "Show"} Formula
-          </button>
-          {formulaOpen && (
-            <div className="formula-details">
-              {appliedFormula ? (
-                <>
-                  <div className="formula-row">
-                    <span className="formula-label">Rule</span>
-                    <span className="formula-val">{appliedFormula.condition}</span>
-                  </div>
-                  <div className="formula-row">
-                    <span className="formula-label">Type</span>
-                    <span className="formula-type">{appliedFormula.type.replace(/_/g, " ")}</span>
-                  </div>
-                  <div className="formula-row">
-                    <span className="formula-label">Confidence</span>
-                    <span className="formula-conf">{(appliedFormula.confidence * 100).toFixed(1)}%</span>
-                  </div>
-                  <div className="formula-row">
-                    <span className="formula-label">Support</span>
-                    <span className="formula-val">{appliedFormula.support} matches</span>
-                  </div>
-                  <div className="formula-desc">{appliedFormula.description}</div>
-                </>
-              ) : (
-                <div className="formula-desc">AI-enhanced prediction (no single rule)</div>
-              )}
-            </div>
-          )}
-        </div>
 
         {winStreak >= 5 && (
           <div className={`streak-badge show ${winStreak >= 10 ? "badge-10" : "badge-5"}`}>
