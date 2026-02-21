@@ -94,24 +94,14 @@ const WingoPanel = () => {
     }, 2500);
   }, [spawnConfetti]);
 
-  // ─── ANIMATE PREDICTION (scanning style, only in first 3s) ────
+  // ─── ANIMATE PREDICTION (neural network animation) ────
   const showPredictionAnim = useCallback((finalText: string, css: string) => {
     if (genTimerRef.current) {
       clearTimeout(genTimerRef.current);
       genTimerRef.current = null;
     }
 
-    const remaining = getSecondsInPeriod();
-    // Only animate in the first 3 seconds of a new period (remaining >= 27)
-    if (remaining <= 27) {
-      // No animation, just show the prediction directly
-      setPredClass(css);
-      setPrediction(finalText);
-      setIsGenerating(false);
-      return;
-    }
-
-    // Show scanning animation
+    // Always show neural network animation when a new prediction arrives
     setIsGenerating(true);
     setPredClass("is-generating");
     setPrediction("⟳");
@@ -124,8 +114,8 @@ const WingoPanel = () => {
       setTimeout(() => {
         setPredClass(css);
       }, 650);
-    }, 1800);
-  }, [getSecondsInPeriod]);
+    }, 2200);
+  }, []);
 
   // ─── FETCH DATA ────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
