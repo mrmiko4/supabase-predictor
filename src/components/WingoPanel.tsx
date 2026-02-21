@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import NeuralNetworkCanvas from "./NeuralNetworkCanvas";
 import "./WingoPanel.css";
 
 interface HistoryRow {
@@ -419,9 +420,16 @@ const WingoPanel = () => {
             <span className="countdown-span">{countdown}</span>
           </div>
           <div className="next-period">{shortPeriod(nextPeriod)}</div>
-          <div className={predClassName}>
-            {prediction}
-          </div>
+          {isGenerating ? (
+            <div className="nn-anim-container">
+              <NeuralNetworkCanvas active={true} width={210} height={60} />
+              <div className="nn-processing-label">processing…</div>
+            </div>
+          ) : (
+            <div className={predClassName}>
+              {prediction}
+            </div>
+          )}
         </div>
 
         {/* Formula Inspector */}
@@ -506,7 +514,7 @@ const WingoPanel = () => {
             </tbody>
           </table>
         </div>
-        <div className="footer-note">live sync · Self-Adaptive Rule Engine · AI + Formula Extraction</div>
+        <div className="footer-note">live sync · 50/50 Random Engine · Neural Network UI</div>
       </div>
     </>
   );
